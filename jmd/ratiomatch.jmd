@@ -1,0 +1,170 @@
+# Ratio matching loss and pullbacks
+
+Load required packages and define data structure 
+```julia; results = "hidden"
+using LinearAlgebra
+using NNlib, Zygote, BenchmarkTools
+using SpinModels: SRBM, ratiomatch, RatioMatchBuffer
+
+function randdata(P = 50, q = 21, N = 59, M = 256)
+    z = Float32.(1:q .== rand(1:q, 1, N, M))
+    θ = SRBM(N = N, P = P, q = q, similarto = z)
+    @. θ.J = randn()
+    @. θ.h = randn()
+    @. θ.W = randn()
+    @. θ.b = randn()
+    return z, θ
+end
+```
+
+We start from the changes in energy due to flipping spin `k` into new state `ϕ`: `ΔE[ϕ,k,m] = E(zᵠᵏ) - E(z)`
+```julia; results = "hidden"
+ΔEʰ(z, h) = .-(h .- sum(h .* z; dims = 1))
+function ΔEᴶ(z, J)
+    q, N, M = size(z)
+    K = reshape(J, q*N, q*N) .+ transpose(reshape(J, q*N, q*N))
+    ΔE = .-K * reshape(z, :, M)
+    return reshape(ΔE, q,N,M) .- sum(reshape(ΔE, q,N,M) .* z, dims = 1)
+end
+function ΔEᵂ(z, W, b)
+    q, N, M = size(z)
+    B = b .+ (reshape(W, :, q*N) * reshape(z, :, M))    # B[a,m]
+    E = .-sum(logcosh, B, dims = 1)
+    B̃ = reshape(B, :,1,1,M) .+ W .- sum(W .* reshape(z, 1,q,N,M), dims = 2)
+    Ẽ = .-sum(logcosh, B̃, dims = 1)
+    return reshape(Ẽ, q,N,M) .- reshape(E, 1,1,M)
+end
+```
+
+The score matching loss is proportional to `∑ᵩₖₘ(1-sigmoid(E(zᵠᵏ)-E(z)))²` with constant shift and scaling defined below
+```julia; results = "hidden"
+ℓ(z, θ::SRBM) = ℓ(z, θ.J, θ.h, θ.W, θ.b)
+function ℓ(z, J, h, W, b)
+    q, N, M = size(z)
+    ΔE = ΔEʰ(z, h) .+ ΔEᴶ(z, J) .+ ΔEᵂ(z, W,b)
+    L = sum(x -> abs2(1-sigmoid(x)), ΔE)
+    # subtract contribution from zᵠᵏ = z (N terms per sample) for which ΔE = 0 and (1-σ(ΔE))² = 1/4
+    L-= 1//4 * N * M
+    # take the average over M samples and N*(q-1) neighboring states per sample
+    L*= 1//(M * N * (q-1))
+    # multiply by 4 so that unstructured model (ΔE = 0 for all zᵠᵏ and z) gives L = 1
+    L*= 4
+    return L
+end
+```
+
+Get some data and a model with random parameters
+```julia; results = "hidden"
+z, θ = randdata()
+```
+
+Check if the energies from energy function above agree with `SpinModels.ratiomatch()`
+```julia; term = true
+ℓ(z, θ) ≈ ratiomatch(z, θ)
+ℓ(z, θ) - ratiomatch(z, θ)
+```
+
+
+Take the gradients of the loss using automatic differentiation on the explicit score matching loss (defined above)
+```julia; results = "hidden"
+∂ℓ(z, θ) = gradient((x...) -> ℓ(z, x...), θ.J, θ.h, θ.W, θ.b)
+J̄, h̄, W̄, b̄ = ∂ℓ(z, θ)
+```
+Compute the gradients using `SpinModels.ratiomatch()`
+```julia; results = "hidden"
+θ̄ = similar(θ);
+ratiomatch(z, θ, θ̄);
+```
+Check if the gradients from the two methods agree
+```julia; term = true
+(J̄, h̄, W̄, b̄) .≈ (θ̄.J, θ̄.h, θ̄.W, θ̄.b)
+[norm(x .- y, Inf) for (x, y) ∈ zip((J̄, h̄, W̄, b̄), (θ̄.J, θ̄.h, θ̄.W, θ̄.b))]'
+```
+
+## GPU test
+
+```julia; results = "hidden"
+using CUDA
+gpu(x) = CuArray(x)
+gpu(θ::SRBM) = SRBM(gpu(θ.J), gpu(θ.h), gpu(θ.W), gpu(θ.b))
+```
+
+Copy data and model to GPU
+```julia; results = "hidden"
+cu_z = CUDA.functional() ? gpu(z) : nothing
+cu_θ = CUDA.functional() ? gpu(θ) : nothing
+cu_θ̄ = CUDA.functional() ? gpu(θ̄) : nothing
+```
+
+Check the correcness of GPU codes 
+```julia; term = true
+CUDA.functional() && (ℓ(z, θ) ≈ ℓ(cu_z, cu_θ))
+CUDA.functional() && (ℓ(z, θ) - ℓ(cu_z, cu_θ))
+CUDA.functional() && (ℓ(z, θ) ≈ ratiomatch(cu_z, cu_θ))
+CUDA.functional() && (ℓ(z, θ) - ratiomatch(cu_z, cu_θ))
+```
+
+Compute the gradients
+```julia; results = "hidden"
+if CUDA.functional()
+    (cu_J̄, cu_h̄, cu_W̄, cu_b̄) = ∂ℓ(cu_z, cu_θ)       # Explicit code
+    ratiomatch(cu_z, cu_θ, cu_θ̄)                    # From `SpinModels`
+end
+```
+
+Check if the gradients on GPU agree with those on CPU
+```julia; term = true
+CUDA.functional() && ((J̄, h̄, W̄, b̄) .≈ collect.((cu_J̄, cu_h̄, cu_W̄, cu_b̄)))
+CUDA.functional() && [norm(x .- y, Inf) for (x, y) ∈ zip((J̄, h̄, W̄, b̄), collect.((cu_J̄, cu_h̄, cu_W̄, cu_b̄)))]'
+
+CUDA.functional() && ((J̄, h̄, W̄, b̄) .≈ collect.((cu_θ̄.J, cu_θ̄.h, cu_θ̄.W, cu_θ̄.b)))
+CUDA.functional() && [norm(x .- y, Inf) for (x, y) ∈ zip((J̄, h̄, W̄, b̄), collect.((cu_θ̄.J, cu_θ̄.h, cu_θ̄.W, cu_θ̄.b)))]'
+```
+
+## Benchmarks
+
+Create buffers for pre-allocated versions of the code
+```julia; results = "hidden"
+buffer = RatioMatchBuffer(z, θ)
+cu_buffer = CUDA.functional() ? RatioMatchBuffer(cu_z, cu_θ) : nothing
+```
+
+### Loss function
+On CPU
+```julia; term = true
+@btime ℓ($z, $θ);                                               # Explicit code (defined above)
+@btime ratiomatch($z, $θ);                                      # From `SpinModels`
+@btime ratiomatch($z, $θ, $buffer);                             # From `SpinModels` (pre-allocated)
+```
+On GPU
+```julia; term = true
+CUDA.functional() && CUDA.@time ℓ(cu_z, cu_θ);                  # Explicit code (defined above)
+CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ);         # From `SpinModels`
+CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_buffer);# From `SpinModels` (pre-allocated)
+```
+
+### Gradients
+
+On CPU
+```julia; term = true
+@btime ∂ℓ($z, $θ);                                              # Explicit code (defined above)
+@btime ratiomatch($z, $θ, $θ̄);                                  # From `SpinModels`
+@btime ratiomatch($z, $θ, $θ̄, $buffer);                         # From `SpinModels` (pre-allocated)
+```
+On GPU
+```julia; term = true
+CUDA.functional() && CUDA.@time ∂ℓ(cu_z, cu_θ);                 # Explicit code (defined above)
+CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_θ̄);   # From `SpinModels`
+CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_θ̄, cu_buffer);# From `SpinModels` (pre-allocated)
+```
+
+
+## System information
+
+```julia; term = true
+using InteractiveUtils; versioninfo()
+```
+GPU information
+```julia; term = true
+CUDA.functional() && run(`nvidia-smi`);
+```

@@ -1,0 +1,101 @@
+# Spin model energy
+
+Load required packages and define data structure 
+```julia; results = "hidden"
+using LinearAlgebra
+using NNlib, BenchmarkTools
+using SpinModels: SRBM, energy, EnergyBuffer
+
+function randdata(P = 50, q = 21, N = 59, M = 256)
+    z = Float32.(1:q .== rand(1:q, 1, N, M))
+    θ = SRBM(N = N, P = P, q = q, similarto = z)
+    @. θ.J = randn()
+    @. θ.h = randn()
+    @. θ.W = randn()
+    @. θ.b = randn()
+    return z, θ
+end
+```
+
+We first write down the energy function which will be compared to `SpinModels.energy()`
+```julia; results = "hidden"
+ε(z, θ::SRBM) = ((; J, h, W, b) = θ; ε(z, J, h, W, b))
+function ε(z::AbstractMatrix, J, h, W, b)
+    E = dot(vec(z), vec(h))
+    E+= transpose(vec(z)) * reshape(J, length(z), length(z)) * vec(z)
+    E+= sum(logcosh, b .+ (reshape(W, :, length(z)) * vec(z)))
+    return -E
+end
+```
+For batched data we define another method
+```julia; results = "hidden"
+ε(z::AbstractArray{<:Any, 3}, θ::SRBM) = [ε(xₘ, θ) for xₘ ∈ eachslice(z; dims = 3)]
+```
+
+Get some data and a model with random parameters
+```julia; results = "hidden"
+z, θ = randdata()
+```
+
+Check if the energies from energy function above agree with `SpinModels.energy()`
+```julia; term = true
+ε(z, θ) ≈ energy(z, θ)
+
+norm(ε(z, θ) .- energy(z, θ), Inf)
+```
+
+## GPU test
+
+```julia; results = "hidden"
+using CUDA
+gpu(x) = CuArray(x)
+```
+
+Copy data and model to GPU
+```julia; results = "hidden"
+cu_z = CUDA.functional() ? gpu(z) : nothing
+cu_θ = CUDA.functional() ? SRBM(gpu(θ.J), gpu(θ.h), gpu(θ.W), gpu(θ.b)) : nothing
+```
+
+Check the correcness of GPU codes
+```julia; term = true
+CUDA.functional() && (ε(z, θ) ≈ ε(cu_z, cu_θ))
+CUDA.functional() && norm(ε(z, θ) .- ε(cu_z, cu_θ), Inf)
+```
+```julia; term = true
+CUDA.functional() && (ε(z, θ) ≈ collect(energy(cu_z, cu_θ)))
+CUDA.functional() && norm(ε(z, θ) .- collect(energy(cu_z, cu_θ)), Inf)
+```
+
+## Benchmarks
+
+Create buffers for pre-allocated versions of the code
+```julia; results = "hidden"
+buffer = EnergyBuffer(z, θ)
+cu_buffer = CUDA.functional() ? EnergyBuffer(cu_z, cu_θ) : nothing
+```
+
+On CPU
+```julia; term = true
+@btime ε($z, $θ);                                               # Explicit code (defined above)
+@btime energy($z, $θ);                                          # From `SpinModels`
+@btime energy($z, $θ, $buffer);                                 # From `SpinModels` (pre-allocated)
+```
+
+On GPU
+```julia; term = true
+CUDA.functional() && CUDA.@time ε(cu_z, cu_θ);                  # Explicit code (defined above)
+CUDA.functional() && CUDA.@time energy(cu_z, cu_θ);             # From `SpinModels`
+CUDA.functional() && CUDA.@time energy(cu_z, cu_θ, cu_buffer);  # From `SpinModels` (pre-allocated)
+```
+
+## System information
+
+
+```julia; term = true
+using InteractiveUtils; versioninfo()
+```
+GPU information
+```julia; term = true
+CUDA.functional() && run(`nvidia-smi`);
+```
