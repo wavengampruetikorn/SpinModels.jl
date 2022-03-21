@@ -15,16 +15,18 @@ struct RatioMatchBuffer{T3,M,T4}
         has_h, has_J, has_W = (hasproperty(θ, s) for s ∈ (:h, :J, :W))
         X = has_h ? θ.h : has_J ? θ.J : θ.W
         ΔE, A = ntuple(i -> similar(X, q,N,M), 2)
-        A₁ = (has_h | has_J) ? similar(X, 1,N,M) : nothing
-        A₁₂= has_W ? similar(X, 1,1,M) : nothing
-        K  = has_J ? similar(X, q*N,q*N) : nothing
-        B  = has_W ? similar(X, θ.P,M) : nothing
-        B₁ = has_W ? similar(X, 1,M) : nothing
-        B̃  = has_W ? similar(X, θ.P,q,N,M) : nothing
-        B̃₁ = has_W ? similar(X, 1,q,N,M) : nothing
-        B̃₂ = has_W ? similar(X, θ.P,1,N,M) : nothing
-        B̃₄ = has_W ? similar(X, θ.P,q,N,1) : nothing
-        return new{typeof(A), typeof(K), typeof(B̃)}(ΔE, A, A₁, A₁₂, K, B, B₁, B̃, B̃₁, B̃₂, B̃₄)
+        A₁ = (has_h | has_J) ? similar(X, 1,N,M) : similar(X, 0,0,0)
+        A₁₂= has_W ? similar(X, 1,1,M) : similar(X, 0,0,0)
+        K  = has_J ? similar(X, q*N,q*N) : similar(X, 0,0)
+        B  = has_W ? similar(X, θ.P,M) : similar(X, 0,0)
+        B₁ = has_W ? similar(X, 1,M) : similar(X, 0,0)
+        B̃  = has_W ? similar(X, θ.P,q,N,M) : similar(X, 0,0,0,0)
+        B̃₁ = has_W ? similar(X, 1,q,N,M) : similar(X, 0,0,0,0)
+        B̃₂ = has_W ? similar(X, θ.P,1,N,M) : similar(X, 0,0,0,0)
+        B̃₄ = has_W ? similar(X, θ.P,q,N,1) : similar(X, 0,0,0,0)
+        return new{typeof(A), typeof(K), typeof(B̃)}(
+            ΔE, A, A₁, A₁₂, K, B, B₁, B̃, B̃₁, B̃₂, B̃₄
+        )
     end
     RatioMatchBuffer(z::AbstractArray{<:Any,3}, θ::SpinModel) = RatioMatchBuffer(θ, size(z,3))
 end
