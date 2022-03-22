@@ -11,3 +11,4 @@ jmddir(x...) = joinpath(@__DIR__, x...)
 
 weave(jmddir("energy.jmd"), out_path = docs_path, doctype = "github");
 weave(jmddir("ratiomatch.jmd"), out_path = docs_path, doctype = "github");
+weave(jmddir("samplers.jmd"), out_path = docs_path, doctype = "github");

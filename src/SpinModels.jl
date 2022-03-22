@@ -13,4 +13,11 @@ include("energy.jl")
 export ratiomatch, RatioMatchBuffer
 include("losses/ratiomatch.jl")
 
+export SpinSampler, acceptrate, currentstate, batchsize, spinstates, spinsnum
+export MetropolisHastings, metropolishastings!
+export GibbsWithGradients, gibbswithgradients!
+include("samplers/SpinSamplers.jl")
+using .SpinSamplers
+
+
 end # module

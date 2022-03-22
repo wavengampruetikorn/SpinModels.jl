@@ -1,0 +1,215 @@
+# Samplers
+
+Load required packages
+```julia; results = "hidden"
+using LinearAlgebra, Random, Printf
+using NNlib, Zygote, BenchmarkTools, CUDA
+using Flux: onecold
+using StatsBase: kldivergence
+using SpinModels
+```
+
+## Set-up
+
+```julia; results = "hidden"
+function randdata(P = 50, q = 21, N = 59, M = 256)
+    z = Float32.(1:q .== rand(1:q, 1, N, M))
+    θ = SRBM(N = N, P = P, q = q, similarto = z)
+    @. θ.J = randn()
+    @. θ.h = randn()
+    if hasproperty(θ, :W)
+        @. θ.W = randn()
+        @. θ.b = randn()
+    end
+    if CUDA.functional()
+        cu_z = CuArray(z)
+        cu_θ = SRBM(CuArray(θ.J), CuArray(θ.h), CuArray(θ.W), CuArray(θ.b))
+        return z, θ, cu_z, cu_θ
+    else
+        return z, θ, nothing, nothing
+    end
+end
+```
+
+True probability mass distribution
+```julia; results = "hidden"
+function true_pmf(q, N, θ)
+    q^N > 10^7 && error("too many states!")
+    ℙ = Vector{Float32}(undef, q^N)
+    x = zeros(q, N)
+    inds = Vector{CartesianIndex{2}}(undef, N)
+    for (n,s) ∈ enumerate(Iterators.product(ntuple(i -> 1:q, N)...))
+        inds .= CartesianIndex.(s, 1:N)
+        x[inds] .= 1
+        ℙ[n] = -energy(x, θ)[1]
+        n == onehot2ind(x)[1] || error("incorrect `onehot2ind()`!")
+        x[inds] .= 0
+    end
+    return softmax!(ℙ)
+end
+```
+Define a function for converting onehot encoded states to the state indices in the true probability vector
+```julia; results = "hidden"
+function onehot2ind(x)
+    q, N = size(x)[1:2]
+    y = collect(onecold(x, 1:q))
+    return 1 .+ transpose(y.-1) * (q.^(0:N-1))
+end
+```
+Empirical probability mass distribution
+```julia; results = "hidden"
+function empr_pmf(x::AbstractArray{<:Any,3})
+    q, N, M = size(x)
+    q^N > 10^7 && error("too many states!")
+    𝕡 = zeros(q^N)
+    for n ∈ onehot2ind(x)
+        𝕡[n]+=1
+    end
+    𝕡 .*= 1//M
+    return 𝕡
+end
+```
+
+Interfact to the samplers in `SpinModels`
+```julia; results = "hidden"
+function draw(sampler::SpinSampler, energy, z₀; showevery = 50, steps = 500, true_pmf)
+    z = copy(z₀)
+    flips = 0.0
+    for i ∈ 0:steps
+        i > 0 && sampler(z, energy)
+        flips += iszero(i) ? 0 : mean(acceptrate(sampler))
+        iszero(i) && @printf "step   rate  <flips>  KL[q|p]\n"
+        iszero(i) && @printf "-----  ----  -------  -------\n"
+        if iszero(i%showevery)
+            accrate = iszero(i) ? 0 : mean(acceptrate(sampler))
+            kl = kldivergence(empr_pmf(z), true_pmf, 2)
+            @printf "%5d  %4.2f  %7.1f  %7.3f\n" i accrate flips kl
+        end
+    end
+end
+```
+
+## initialize data and model
+
+Get data, model and construct true probability vector
+```julia; results = "hidden"
+P, q, N, M = 20, 4, 5, 2048 # 20 hidden units, 5 4-state spins and sample size 2048
+z, θ, cu_z, cu_θ = randdata(P, q, N, M)
+ℙ = true_pmf(q, N, θ)
+```
+
+## Matropolis-Hastings method
+
+```julia; results = "hidden"
+function init_mh(z, θ)
+    energybuffer = EnergyBuffer(z, θ)
+    E = x -> energy(x, θ, energybuffer)
+    mh = MetropolisHastings(z)
+    return  mh, E
+end
+```
+
+```julia; term = true
+draw(init_mh(z, θ)..., z; true_pmf = ℙ)                                 # on CPU
+CUDA.functional() && draw(init_mh(cu_z, cu_θ)..., cu_z; true_pmf = ℙ)   # on GPU
+```
+
+## Gibbs with gradients
+
+```julia; results = "hidden"
+function init_gwg(z, θ)
+    energybuffer = EnergyBuffer(z, θ)
+    ∂E = x -> (
+        E  = energy(x, θ, energybuffer); 
+        ∇E = ∂x_energy(x, θ, energybuffer); 
+        (E, ∇E)
+    )
+    gwg = GibbsWithGradients(z)
+    return  gwg, ∂E
+end
+```
+
+```julia; term = true
+draw(init_gwg(z, θ)..., z; true_pmf = ℙ)                                # on CPU
+CUDA.functional() && draw(init_gwg(cu_z, cu_θ)..., cu_z; true_pmf = ℙ)  # on GPU
+```
+
+## Benchmarks
+
+### Metropolis-Hastings
+```julia; results = "hidden"
+function benchmark_mh(M; P = 20, q = 21, N = 59, gpu = false)
+    z, θ, cu_z, cu_θ = randdata(P, q, N, M)
+    if gpu && CUDA.functional()
+        mh, E = init_mh(cu_z, cu_θ)
+        @btime CUDA.@sync $mh($cu_z, $E)
+    else
+        mh, E = init_mh(z, θ)
+        @btime $mh($z, $E)
+    end
+    (gpu & !CUDA.functional()) && @printf "No GPU"
+    return nothing
+end
+```
+
+Test at different numbers of parallel MC chains
+```julia; term = true
+benchmark_mh(100)
+benchmark_mh(500)
+benchmark_mh(1000)
+benchmark_mh(3000)
+```
+
+```julia; term = true
+benchmark_mh(100,  gpu = true)
+benchmark_mh(500,  gpu = true)
+benchmark_mh(1000, gpu = true)
+benchmark_mh(3000, gpu = true)
+```
+
+### Gibbs with gradients
+```julia; results = "hidden"
+function benchmark_gwg(M; P = 20, q = 21, N = 59, gpu = false)
+    z, θ, cu_z, cu_θ = randdata(P, q, N, M)
+    if gpu && CUDA.functional()
+        gwg, ∂E = init_gwg(cu_z, cu_θ)
+        @btime CUDA.@sync $gwg($cu_z, $∂E)
+    else
+        gwg, ∂E = init_gwg(z, θ)
+        @btime $gwg($z, $∂E)
+    end
+    (gpu & !CUDA.functional()) && @printf "No GPU"
+    return nothing
+end
+```
+
+Test at different numbers of parallel MC chains
+```julia; term = true
+benchmark_gwg(100)
+benchmark_gwg(500)
+benchmark_gwg(1000)
+benchmark_gwg(3000)
+```
+
+```julia; term = true
+benchmark_gwg(100,  gpu = true)
+benchmark_gwg(500,  gpu = true)
+benchmark_gwg(1000, gpu = true)
+benchmark_gwg(3000, gpu = true)
+```
+
+
+## System information
+
+```julia; term = true
+using InteractiveUtils; versioninfo()
+```
+Thread information
+```julia; term = true
+Sys.CPU_THREADS
+BLAS.get_num_threads()
+```
+GPU information
+```julia; term = true
+CUDA.functional() && run(`nvidia-smi`);
+```
