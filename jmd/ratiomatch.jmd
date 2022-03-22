@@ -3,7 +3,7 @@
 Load required packages and define data structure 
 ```julia; results = "hidden"
 using LinearAlgebra
-using NNlib, Zygote, BenchmarkTools
+using NNlib, Zygote, BenchmarkTools, CUDA
 using SpinModels: SRBM, ratiomatch, RatioMatchBuffer
 
 function randdata(P = 50, q = 21, N = 59, M = 256)
@@ -11,9 +11,17 @@ function randdata(P = 50, q = 21, N = 59, M = 256)
     θ = SRBM(N = N, P = P, q = q, similarto = z)
     @. θ.J = randn()
     @. θ.h = randn()
-    @. θ.W = randn()
-    @. θ.b = randn()
-    return z, θ
+    if hasproperty(θ, :W)
+        @. θ.W = randn()
+        @. θ.b = randn()
+    end
+    if CUDA.functional()
+        cu_z = CuArray(z)
+        cu_θ = SRBM(CuArray(θ.J), CuArray(θ.h), CuArray(θ.W), CuArray(θ.b))
+        return z, θ, cu_z, cu_θ
+    else
+        return z, θ, nothing, nothing
+    end
 end
 ```
 
@@ -55,7 +63,7 @@ end
 
 Get some data and a model with random parameters
 ```julia; results = "hidden"
-z, θ = randdata()
+z, θ, cu_z, cu_θ = randdata()
 ```
 
 Check if the energies from energy function above agree with `SpinModels.ratiomatch()`
@@ -83,18 +91,6 @@ Check if the gradients from the two methods agree
 
 ## GPU test
 
-```julia; results = "hidden"
-using CUDA
-gpu(x) = CuArray(x)
-gpu(θ::SRBM) = SRBM(gpu(θ.J), gpu(θ.h), gpu(θ.W), gpu(θ.b))
-```
-
-Copy data and model to GPU
-```julia; results = "hidden"
-cu_z = CUDA.functional() ? gpu(z) : nothing
-cu_θ = CUDA.functional() ? gpu(θ) : nothing
-cu_θ̄ = CUDA.functional() ? gpu(θ̄) : nothing
-```
 
 Check the correcness of GPU codes 
 ```julia; term = true
@@ -107,6 +103,7 @@ CUDA.functional() && (ℓ(z, θ) - ratiomatch(cu_z, cu_θ))
 Compute the gradients
 ```julia; results = "hidden"
 if CUDA.functional()
+    cu_θ̄ = similar(cu_θ)
     (cu_J̄, cu_h̄, cu_W̄, cu_b̄) = ∂ℓ(cu_z, cu_θ)       # Explicit code
     ratiomatch(cu_z, cu_θ, cu_θ̄)                    # From `SpinModels`
 end
@@ -138,9 +135,9 @@ On CPU
 ```
 On GPU
 ```julia; term = true
-CUDA.functional() && CUDA.@time ℓ(cu_z, cu_θ);                  # Explicit code (defined above)
-CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ);         # From `SpinModels`
-CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_buffer);# From `SpinModels` (pre-allocated)
+CUDA.functional() && @btime CUDA.@sync ℓ(cu_z, cu_θ);                  # Explicit code (defined above)
+CUDA.functional() && @btime CUDA.@sync ratiomatch(cu_z, cu_θ);         # From `SpinModels`
+CUDA.functional() && @btime CUDA.@sync ratiomatch(cu_z, cu_θ, cu_buffer);# From `SpinModels` (pre-allocated)
 ```
 
 ### Gradients
@@ -153,9 +150,9 @@ On CPU
 ```
 On GPU
 ```julia; term = true
-CUDA.functional() && CUDA.@time ∂ℓ(cu_z, cu_θ);                 # Explicit code (defined above)
-CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_θ̄);   # From `SpinModels`
-CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_θ̄, cu_buffer);# From `SpinModels` (pre-allocated)
+CUDA.functional() && @btime CUDA.@sync ∂ℓ(cu_z, cu_θ);                 # Explicit code (defined above)
+CUDA.functional() && @btime CUDA.@sync ratiomatch(cu_z, cu_θ, cu_θ̄);   # From `SpinModels`
+CUDA.functional() && @btime CUDA.@sync ratiomatch(cu_z, cu_θ, cu_θ̄, cu_buffer);# From `SpinModels` (pre-allocated)
 ```
 
 
@@ -163,6 +160,11 @@ CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_θ̄, cu_buffer);# Fr
 
 ```julia; term = true
 using InteractiveUtils; versioninfo()
+```
+Thread information
+```julia; term = true
+Sys.CPU_THREADS
+BLAS.get_num_threads()
 ```
 GPU information
 ```julia; term = true

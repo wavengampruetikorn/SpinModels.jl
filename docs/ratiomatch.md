@@ -3,7 +3,7 @@
 Load required packages and define data structure 
 ```julia
 using LinearAlgebra
-using NNlib, Zygote, BenchmarkTools
+using NNlib, Zygote, BenchmarkTools, CUDA
 using SpinModels: SRBM, ratiomatch, RatioMatchBuffer
 
 function randdata(P = 50, q = 21, N = 59, M = 256)
@@ -11,9 +11,17 @@ function randdata(P = 50, q = 21, N = 59, M = 256)
     θ = SRBM(N = N, P = P, q = q, similarto = z)
     @. θ.J = randn()
     @. θ.h = randn()
-    @. θ.W = randn()
-    @. θ.b = randn()
-    return z, θ
+    if hasproperty(θ, :W)
+        @. θ.W = randn()
+        @. θ.b = randn()
+    end
+    if CUDA.functional()
+        cu_z = CuArray(z)
+        cu_θ = SRBM(CuArray(θ.J), CuArray(θ.h), CuArray(θ.W), CuArray(θ.b))
+        return z, θ, cu_z, cu_θ
+    else
+        return z, θ, nothing, nothing
+    end
 end
 ```
 
@@ -64,7 +72,7 @@ end
 
 Get some data and a model with random parameters
 ```julia
-z, θ = randdata()
+z, θ, cu_z, cu_θ = randdata()
 ```
 
 
@@ -76,7 +84,7 @@ julia> ℓ(z, θ) ≈ ratiomatch(z, θ)
 true
 
 julia> ℓ(z, θ) - ratiomatch(z, θ)
-0.0f0
+2.3841858f-7
 ```
 
 
@@ -101,34 +109,16 @@ ratiomatch(z, θ, θ̄);
 Check if the gradients from the two methods agree
 ```julia
 julia> (J̄, h̄, W̄, b̄) .≈ (θ̄.J, θ̄.h, θ̄.W, θ̄.b)
-(true, true, true, false)
+(true, true, true, true)
 
 julia> [norm(x .- y, Inf) for (x, y) ∈ zip((J̄, h̄, W̄, b̄), (θ̄.J, θ̄.h, θ̄.W, θ̄.b))]'
 1×4 adjoint(::Vector{Float32}) with eltype Float32:
- 1.04774f-9  5.62977f-10  6.63567f-9  3.85649f-6
+ 1.1205f-9  6.04814f-10  7.03585f-9  4.97919f-7
 ```
 
 
 
 ## GPU test
-
-```julia
-using CUDA
-gpu(x) = CuArray(x)
-gpu(θ::SRBM) = SRBM(gpu(θ.J), gpu(θ.h), gpu(θ.W), gpu(θ.b))
-```
-
-
-
-
-Copy data and model to GPU
-```julia
-cu_z = CUDA.functional() ? gpu(z) : nothing
-cu_θ = CUDA.functional() ? gpu(θ) : nothing
-cu_θ̄ = CUDA.functional() ? gpu(θ̄) : nothing
-```
-
-
 
 
 Check the correcness of GPU codes 
@@ -150,6 +140,7 @@ julia> CUDA.functional() && (ℓ(z, θ) - ratiomatch(cu_z, cu_θ))
 
 Compute the gradients
 ```julia
+cu_θ̄ = similar(cu_θ)
 if CUDA.functional()
     (cu_J̄, cu_h̄, cu_W̄, cu_b̄) = ∂ℓ(cu_z, cu_θ)       # Explicit code
     ratiomatch(cu_z, cu_θ, cu_θ̄)                    # From `SpinModels`
@@ -166,14 +157,14 @@ julia> CUDA.functional() && ((J̄, h̄, W̄, b̄) .≈ collect.((cu_J̄, cu_h̄,
 
 julia> CUDA.functional() && [norm(x .- y, Inf) for (x, y) ∈ zip((J̄, h̄, W̄, b̄), collect.((cu_J̄, cu_h̄, cu_W̄, cu_b̄)))]'
 1×4 adjoint(::Vector{Float32}) with eltype Float32:
- 2.25555f-9  1.44064f-9  6.85395f-9  1.68511f-8
+ 2.88128f-9  1.85537f-9  6.03904f-9  1.57488f-8
 
 julia> CUDA.functional() && ((J̄, h̄, W̄, b̄) .≈ collect.((cu_θ̄.J, cu_θ̄.h, cu_θ̄.W, cu_θ̄.b)))
 (true, true, true, true)
 
 julia> CUDA.functional() && [norm(x .- y, Inf) for (x, y) ∈ zip((J̄, h̄, W̄, b̄), collect.((cu_θ̄.J, cu_θ̄.h, cu_θ̄.W, cu_θ̄.b)))]'
 1×4 adjoint(::Vector{Float32}) with eltype Float32:
- 2.35741f-9  1.49157f-9  6.66478f-9  2.13913f-8
+ 2.86673f-9  1.9154f-9  6.37374f-9  3.17814f-8
 ```
 
 
@@ -193,26 +184,26 @@ cu_buffer = CUDA.functional() ? RatioMatchBuffer(cu_z, cu_θ) : nothing
 On CPU
 ```julia
 julia> @btime ℓ($z, $θ);                                               # Explicit code (defined above)
-  636.900 ms (72 allocations: 146.70 MiB)
+  517.669 ms (72 allocations: 146.70 MiB)
 
 julia> @btime ratiomatch($z, $θ);                                      # From `SpinModels`
-  611.662 ms (44 allocations: 73.21 MiB)
+  498.698 ms (44 allocations: 73.21 MiB)
 
 julia> @btime ratiomatch($z, $θ, $buffer);                             # From `SpinModels` (pre-allocated)
-  582.325 ms (20 allocations: 1.00 KiB)
+  473.608 ms (20 allocations: 1.00 KiB)
 ```
 
 
 On GPU
 ```julia
-julia> CUDA.functional() && CUDA.@time ℓ(cu_z, cu_θ);                  # Explicit code (defined above)
-  0.032955 seconds (701 CPU allocations: 48.281 KiB) (22 GPU allocations: 146.694 MiB, 0.44% memmgmt time)
+julia> CUDA.functional() && @btime CUDA.@sync ℓ(cu_z, cu_θ);                  # Explicit code (defined above)
+  6.141 ms (701 allocations: 47.84 KiB)
 
-julia> CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ);         # From `SpinModels`
-  0.003661 seconds (636 CPU allocations: 43.094 KiB) (13 GPU allocations: 73.210 MiB, 12.15% memmgmt time)
+julia> CUDA.functional() && @btime CUDA.@sync ratiomatch(cu_z, cu_θ);         # From `SpinModels`
+  6.852 ms (617 allocations: 41.25 KiB)
 
-julia> CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_buffer);# From `SpinModels` (pre-allocated)
-  0.003242 seconds (580 CPU allocations: 40.953 KiB) (2 GPU allocations: 324 bytes, 0.80% memmgmt time)
+julia> CUDA.functional() && @btime CUDA.@sync ratiomatch(cu_z, cu_θ, cu_buffer);# From `SpinModels` (pre-allocated)
+  6.643 ms (562 allocations: 39.41 KiB)
 ```
 
 
@@ -222,26 +213,26 @@ julia> CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_buffer);# From
 On CPU
 ```julia
 julia> @btime ∂ℓ($z, $θ);                                              # Explicit code (defined above)
-  4.985 s (447 allocations: 3.31 GiB)
+  3.795 s (464 allocations: 3.31 GiB)
 
 julia> @btime ratiomatch($z, $θ, $θ̄);                                  # From `SpinModels`
-  977.352 ms (74 allocations: 79.07 MiB)
+  808.252 ms (74 allocations: 79.07 MiB)
 
 julia> @btime ratiomatch($z, $θ, $θ̄, $buffer);                         # From `SpinModels` (pre-allocated)
-  950.697 ms (50 allocations: 5.86 MiB)
+  758.372 ms (50 allocations: 5.86 MiB)
 ```
 
 
 On GPU
 ```julia
-julia> CUDA.functional() && CUDA.@time ∂ℓ(cu_z, cu_θ);                 # Explicit code (defined above)
-  0.012024 seconds (2.65 k CPU allocations: 177.438 KiB) (82 GPU allocations: 760.424 MiB, 27.15% memmgmt time)
+julia> CUDA.functional() && @btime CUDA.@sync ∂ℓ(cu_z, cu_θ);                 # Explicit code (defined above)
+  20.061 ms (2622 allocations: 174.06 KiB)
 
-julia> CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_θ̄);   # From `SpinModels`
-  0.009030 seconds (1.22 k CPU allocations: 82.766 KiB) (14 GPU allocations: 79.066 MiB, 7.11% memmgmt time)
+julia> CUDA.functional() && @btime CUDA.@sync ratiomatch(cu_z, cu_θ, cu_θ̄);   # From `SpinModels`
+  12.684 ms (1165 allocations: 78.28 KiB)
 
-julia> CUDA.functional() && CUDA.@time ratiomatch(cu_z, cu_θ, cu_θ̄, cu_buffer);# From `SpinModels` (pre-allocated)
-  0.008717 seconds (1.16 k CPU allocations: 80.625 KiB) (3 GPU allocations: 5.856 MiB, 4.31% memmgmt time)
+julia> CUDA.functional() && @btime CUDA.@sync ratiomatch(cu_z, cu_θ, cu_θ̄, cu_buffer);# From `SpinModels` (pre-allocated)
+  12.398 ms (1110 allocations: 76.44 KiB)
 ```
 
 
@@ -255,17 +246,27 @@ Julia Version 1.7.1
 Commit ac5cc99908 (2021-12-22 19:35 UTC)
 Platform Info:
   OS: Linux (x86_64-pc-linux-gnu)
-  CPU: Intel(R) Xeon(R) CPU E5-2686 v4 @ 2.30GHz
+  CPU: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
   WORD_SIZE: 64
   LIBM: libopenlibm
-  LLVM: libLLVM-12.0.1 (ORCJIT, broadwell)
+  LLVM: libLLVM-12.0.1 (ORCJIT, cascadelake)
+```
+
+
+Thread information
+```julia
+julia> Sys.CPU_THREADS
+4
+
+julia> BLAS.get_num_threads()
+4
 ```
 
 
 GPU information
 ```julia
 julia> CUDA.functional() && run(`nvidia-smi`);
-Sun Mar 20 05:57:33 2022       
+Tue Mar 22 08:22:19 2022       
 +-----------------------------------------------------------------------------+
 | NVIDIA-SMI 450.142.00   Driver Version: 450.142.00   CUDA Version: 11.0     |
 |-------------------------------+----------------------+----------------------+
@@ -273,8 +274,8 @@ Sun Mar 20 05:57:33 2022
 | Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
 |                               |                      |               MIG M. |
 |===============================+======================+======================|
-|   0  Tesla V100-SXM2...  On   | 00000000:00:1E.0 Off |                    0 |
-| N/A   35C    P0    43W / 300W |   1515MiB / 16160MiB |      4%      Default |
+|   0  Tesla T4            On   | 00000000:00:1E.0 Off |                    0 |
+| N/A   50C    P0    72W /  70W |   2624MiB / 15109MiB |     91%      Default |
 |                               |                      |                  N/A |
 +-------------------------------+----------------------+----------------------+
                                                                                
@@ -283,6 +284,6 @@ Sun Mar 20 05:57:33 2022
 |  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
 |        ID   ID                                                   Usage      |
 |=============================================================================|
-|    0   N/A  N/A      2502      C   julia                            1513MiB |
+|    0   N/A  N/A     20752      C   julia                            2621MiB |
 +-----------------------------------------------------------------------------+
 ```
