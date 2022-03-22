@@ -77,9 +77,9 @@ struct EnergyBuffer{V,T3,M}
         E = similar(X, M)
         A = similar(X, q, N, M)
         A₁₂ = similar(X, 1, 1, M)
-        B = has_W ? similar(X, θ.P, M) : nothing
-        B₁ = has_W ? similar(X, 1, M) : nothing
-        K = has_J ? similar(X, q*N, q*N) : nothing
+        B = has_W ? similar(X, θ.P, M) : similar(X, 0, 0)
+        B₁ = has_W ? similar(X, 1, M) : similar(X, 0, 0)
+        K = has_J ? similar(X, q*N, q*N) : similar(X, 0, 0)
         return new{typeof(E),typeof(A),typeof(B)}(E, A, A₁₂, B, B₁, K)
     end
     EnergyBuffer(z::AbstractArray{<:Any,3}, θ::SpinModel) = EnergyBuffer(θ, size(z,3))
