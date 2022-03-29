@@ -109,6 +109,7 @@ function ratiomatch(z, θ::T, θ̄::T, buffer, gradient = true) where T<:SpinMod
         Ĵ = reshape(J̄, q*N, q*N)
         mul!(Ĵ, reshape(z,:,M), transpose(reshape(A,:,M)))
         Ĵ .+= transpose(Ĵ)
+        dropselfcoupling!(J̄)    # donot update self coupling
         J̄ .*= 4//(M * N * (q-1))
     end
 
