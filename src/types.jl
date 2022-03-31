@@ -41,10 +41,61 @@ function Base.copyto!(θ′::T, θ::T) where T<:SpinModel
     end
     return θ′
 end
+"""
+    copy(θ::SpinModel) = copyto!(similar(θ), θ)
+"""
 Base.copy(θ::SpinModel) = copyto!(similar(θ), θ)
+
+"""
+    rmul!(θ::SpinModel, b::Number)
+
+Multiply the parameters in `θ` by a scalar `b`
+"""
+function LinearAlgebra.rmul!(θ::SpinModel, b::Number)
+    for s ∈ paramnames(θ)
+        rmul!(getfield(θ,s), b)
+    end
+    return θ
+end
+
+"""
+    sum(x::AbstractVector{T}) where T<:SpinModel
+
+Return a model with the energy function equal to the sum of energy functions of models in the input vector
+"""
+function Base.sum(x::AbstractVector{T}) where T<:SpinModel
+    hasfield(T, :h) && (h = sum(ϕ.h for ϕ ∈ x))
+    hasfield(T, :J) && (J = sum(ϕ.J for ϕ ∈ x))
+    hasfield(T, :W) && (W = reduce(vcat, (ϕ.W for ϕ ∈ x)))
+    hasfield(T, :b) && (b = reduce(vcat, (ϕ.b for ϕ ∈ x)))
+    T <: Pairwise && return Pairwise(h, J)
+    T <: SRBM && return SRBM(h, J, W, b)
+    T <: RBM && return RBM(h, W, b)
+end
+
 
 "Copy all model parameters to a new vector"
 veccopy(θ::SpinModel) = copyto!(similar(first(getparams(θ)), length(θ)), θ)
+
+"Convert model parameters to zero-sum gauge"
+function zerosum!(θ::T) where T<:SpinModel
+    hasfield(T, :h) && (θ.h .-= mean(θ.h, dims = 1))
+    if hasfield(T, :J)
+        J = θ.J
+        J_μ̄iνj = mean(J, dims = 1)
+        J_μiν̄j = mean(J, dims = 3)
+        J_μ̄iν̄j = mean(J, dims = (1,3))
+        @. J += - J_μ̄iνj - J_μiν̄j + J_μ̄iν̄j
+        hasfield(T, :h) && (θ.h .+= 2sum(J_μiν̄j .- J_μ̄iν̄j, dims = 4))
+    end
+    if hasfield(T, :W)
+        (; W, b) = θ
+        W_aμ̄i = mean(W, dims = 2)
+        W.-= W_aμ̄i
+        b.+= sum(W_aμ̄i, dims = 3)
+    end
+    return θ
+end
 
 "Set all self-couplings in pairwise interactions to zero"
 dropselfcoupling!(θ::SpinModel) = (hasproperty(θ,:J) && dropselfcoupling!(θ.J))

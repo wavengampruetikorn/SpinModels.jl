@@ -43,10 +43,10 @@ Computed as, for a system of `N` `q`-state spins,
 where `zᵠᵏ` is the same as `z` but with spin `k` in state `ϕ`. 
 This loss vanishes for unstructured models, in which `E(zᵠᵏ) - E(z) = 0` for all `ϕ, k, x`.
 """
-ratiomatch(z, θ::SpinModel) = ratiomatch(z, θ, RatioMatchBuffer(z, θ))
-ratiomatch(z, θ::SpinModel, buffer) = ratiomatch(z, θ, θ, buffer, false)
+ratiomatch(z, θ::SpinModel; energyscale = 1) = ratiomatch(z, θ, RatioMatchBuffer(z, θ); energyscale = energyscale)
+ratiomatch(z, θ::SpinModel, buffer; energyscale = 1) = ratiomatch(z, θ, θ, buffer, false, energyscale)
 ratiomatch(z, θ::T, θ̄::T) where T<:SpinModel = ratiomatch(z, θ, θ̄, RatioMatchBuffer(z, θ))
-function ratiomatch(z, θ::T, θ̄::T, buffer, gradient = true) where T<:SpinModel
+function ratiomatch(z, θ::T, θ̄::T, buffer, gradient = true, energyscale = 1) where T<:SpinModel
     (; ΔE, A, A₁, A₁₂, K, B, B₁, B̃, B̃₁, B̃₂, B̃₄) = buffer
     fill!(ΔE, zero(eltype(ΔE))) # initialize ΔE
     q, N, M = size(z)
@@ -79,6 +79,8 @@ function ratiomatch(z, θ::T, θ̄::T, buffer, gradient = true) where T<:SpinMod
         ΔE.+= reshape(sum!(logcosh, B₁, B), 1,1,M)
         ΔE.-= reshape(sum!(logcosh, B̃₁, B̃), q,N,M)
     end
+
+    isone(energyscale) || rmul!(ΔE, convert(eltype(ΔE), energyscale))
 
     ## Loss ∝ ∑ᵩₖₘ (1-sigmoid(E(zᵠᵏ)-E(z)))² - ∑ᵩₖₘ (zᵠᵏ==z) * (1/4)
     ## We subtract off the terms for which zᵠᵏ==z 

@@ -4,7 +4,7 @@ using LinearAlgebra
 using NNlib
 
 export SpinModel, Pairwise, SRBM, RBM
-export paramnames, getparams, veccopy
+export paramnames, getparams, veccopy, zerosum!
 include("types.jl")
 
 export energy, ∂x_energy, EnergyBuffer
