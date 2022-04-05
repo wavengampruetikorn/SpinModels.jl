@@ -128,12 +128,33 @@ random_W!(W::AbstractArray{<:Number,3}, scale=0.1) = (
 )
 random_b!(b::AbstractVector{<:Number}, scale=0.1) = (@. b = randn() * scale * 1/√length(b))
 
+"""
+    Profile(; N, q, similarto = Float32[]) -> θ::Profile
 
+Create a container for profile (non-interacting spin) model parameters (`h`). 
+
+Parameters are arrays of type similar to `similarto`. 
+"""
+struct Profile{H} <: SpinModel{H}
+    h::H
+    q::Int
+    N::Int
+    function Profile(; N::T, q::T, similarto = Float32[]) where T<:Int
+        h = similar(similarto, q,N)
+        random_h!(h, 0.01)
+        return new{typeof(h)}(h, q, N)
+    end
+    function Profile(h::AbstractMatrix{T}) where T
+        return new{typeof(h)}(h, size(h,1), size(h,2))
+    end
+end
+Base.similar(θ::Profile) = Profile(q = θ.q, N = θ.N, similarto = θ.h)
+random!(θ::Profile, scale = 0.1) = (random_h!(θ.h, scale); θ)
 
 """
     Pairwise(; N, q, similarto = Float32[]) -> θ::Pairwise
 
-Create a container for pairwise model parameters `J`. The diagonal elements plat the role of bias fileds.
+Create a container for pairwise model parameters (`J` & `h`). 
 
 Parameters are arrays of type similar to `similarto`. 
 """
