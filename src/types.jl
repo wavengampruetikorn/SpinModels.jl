@@ -68,9 +68,26 @@ function Base.sum(x::AbstractVector{T}) where T<:SpinModel
     hasfield(T, :J) && (J = sum(ϕ.J for ϕ ∈ x))
     hasfield(T, :W) && (W = reduce(vcat, (ϕ.W for ϕ ∈ x)))
     hasfield(T, :b) && (b = reduce(vcat, (ϕ.b for ϕ ∈ x)))
+    T <: Profile && return Profile(h)
     T <: Pairwise && return Pairwise(h, J)
     T <: SRBM && return SRBM(h, J, W, b)
     T <: RBM && return RBM(h, W, b)
+end
+
+"""
+    mean(x::AbstractVector{T}) where T<:SpinModel
+
+Return a model with the energy function equal to the average of energy functions of models in the input vector
+"""
+function Statistics.mean(x::AbstractVector{T}) where T<:SpinModel
+    hasfield(T, :h) && (h = mean(ϕ.h for ϕ ∈ x))
+    hasfield(T, :J) && (J = mean(ϕ.J for ϕ ∈ x))
+    hasfield(T, :W) && (W = reduce(vcat, (ϕ.W for ϕ ∈ x)))
+    hasfield(T, :b) && (b = reduce(vcat, (ϕ.b for ϕ ∈ x)))
+    T <: Profile && return Profile(h)
+    T <: Pairwise && return Pairwise(h, J)
+    T <: SRBM && return SRBM(h, J, W, b; rbm_wt = 1//length(x))
+    T <: RBM && return RBM(h, W, b; rbm_wt = 1//length(x))
 end
 
 
@@ -139,13 +156,11 @@ struct Profile{H} <: SpinModel{H}
     h::H
     q::Int
     N::Int
+    Profile(h::AbstractMatrix) = new{typeof(h)}(h, size(h,1), size(h,2))
     function Profile(; N::T, q::T, similarto = Float32[]) where T<:Int
         h = similar(similarto, q,N)
         random_h!(h, 0.01)
-        return new{typeof(h)}(h, q, N)
-    end
-    function Profile(h::AbstractMatrix{T}) where T
-        return new{typeof(h)}(h, size(h,1), size(h,2))
+        return Profile(h)
     end
 end
 Base.similar(θ::Profile) = Profile(q = θ.q, N = θ.N, similarto = θ.h)
@@ -163,13 +178,6 @@ struct Pairwise{H,T} <: SpinModel{H}
     J::T    # J[μ,i,ν,j]
     q::Int
     N::Int
-    function Pairwise(; N::T, q::T, similarto = Float32[]) where T<:Int
-        h = similar(similarto, q,N)
-        random_h!(h, 0.01)
-        J = similar(similarto, q,N,q,N)
-        random_J!(J, 0.1)
-        return new{typeof(h),typeof(J)}(h, J, q, N)
-    end
     function Pairwise(h::AbstractMatrix{T}, J::AbstractArray{T,4}) where T
         if !(size(h) == size(J)[1:2] == size(J)[3:4])
             return error("Incompatible arrays: size(h) = $(size(h)), size(J) = $(size(J))")
@@ -177,6 +185,13 @@ struct Pairwise{H,T} <: SpinModel{H}
         return new{typeof(h),typeof(J)}(h, J, size(h,1), size(h,2))
     end
     Pairwise(J::AbstractArray{T,4}, h::AbstractMatrix{T}) where T = Pairwise(h,J)
+    function Pairwise(; N::T, q::T, similarto = Float32[]) where T<:Int
+        h = similar(similarto, q,N)
+        random_h!(h, 0.01)
+        J = similar(similarto, q,N,q,N)
+        random_J!(J, 0.1)
+        return Pairwise(h, J)
+    end
 end
 Base.similar(θ::Pairwise) = Pairwise(q = θ.q, N = θ.N, similarto = θ.h)
 random!(θ::Pairwise, scale = 0.1) = (random_h!(θ.h, scale); random_J!(θ.J, scale); θ)
@@ -188,7 +203,7 @@ Create a container for sRBM parameters (`J`, `h`, `W` & `b`).
 
 Parameters are arrays of type similar to `similarto`.
 """
-struct SRBM{H,TJ,TW,Tb} <: SpinModel{H}
+struct SRBM{H,TJ,TW,Tb,R<:Real} <: SpinModel{H}
     h::H
     J::TJ               # J[i,μ,j,ν]
     W::TW               # W[a,i,μ]
@@ -196,19 +211,11 @@ struct SRBM{H,TJ,TW,Tb} <: SpinModel{H}
     q::Int
     N::Int
     P::Int
-    function SRBM(; N::T, P::T, q::T, similarto = Float32[]) where T<:Int
-        θ = Pairwise(; N=N, q=q, similarto=similarto)
-        iszero(P) && return θ
-        (; h, J) = θ
-        W = similar(J, P,q,N)
-        random_W!(W, 0.1)
-        b = similar(J, P)
-        random_b!(b, 0.01)
-        return new{typeof(h),typeof(J),typeof(W),typeof(b)}(h, J, W, b, q, N, P)
-    end
+    rbm_wt::R           # prefactor in front of the RBM term in energy func
     function SRBM(
             h::AbstractMatrix{T}, J::AbstractArray{T,4}, 
-            W::AbstractArray{T,3}, b::AbstractVector{T}
+            W::AbstractArray{T,3}, b::AbstractVector{T}; 
+            rbm_wt = 1
         ) where T
         if !(size(h) == size(J)[1:2] == size(J)[3:4] == size(W)[2:3])
             return error("Incompatible arrays: size(h) = $(size(h)), size(J) = $(size(J)), size(W) = $(size(W))")
@@ -217,18 +224,30 @@ struct SRBM{H,TJ,TW,Tb} <: SpinModel{H}
             return error("Incompatible arrays: size(W) = $(size(W)), size(b) = $(size(b))")
         end
         P, q, N = size(W)
-        return new{typeof(h),typeof(J),typeof(W),typeof(b)}(h, J, W, b, q, N, P)
+        return new{typeof(h),typeof(J),typeof(W),typeof(b), eltype(h)}(
+            h, J, W, b, q, N, P, convert(eltype(h), rbm_wt)
+        )
     end
-    function SRBM(a1::AbstractArray, a2::AbstractArray, a3::AbstractArray, a4::AbstractArray)
+    function SRBM(; N::T, P::T, q::T, similarto = Float32[], rbm_wt=1) where T<:Int
+        θ = Pairwise(; N=N, q=q, similarto=similarto)
+        iszero(P) && return θ
+        (; h, J) = θ
+        W = similar(J, P,q,N)
+        random_W!(W, 0.1)
+        b = similar(J, P)
+        random_b!(b, 0.01)
+        return SRBM(h, J, W, b; rbm_wt = rbm_wt)
+    end
+    function SRBM(a1::AbstractArray, a2::AbstractArray, a3::AbstractArray, a4::AbstractArray; rbm_wt = 1)
         params = (a1,a2,a3,a4)
         h = params[findfirst(x -> ndims(x)==2, params)]
         J = params[findfirst(x -> ndims(x)==4, params)]
         W = params[findfirst(x -> ndims(x)==3, params)]
         b = params[findfirst(x -> ndims(x)==1, params)]
-        return SRBM(h,J,W,b)
+        return SRBM(h,J,W,b; rbm_wt = rbm_wt)
     end
 end
-Base.similar(θ::SRBM) = SRBM(P = θ.P, q = θ.q, N = θ.N, similarto = θ.h)
+Base.similar(θ::SRBM) = SRBM(P = θ.P, q = θ.q, N = θ.N, similarto = θ.h, rbm_wt = θ.rbm_wt)
 random!(θ::SRBM, scale = 0.1) = (
     random_h!(θ.h, scale); random_J!(θ.J, scale); 
     random_W!(θ.W, scale); random_b!(θ.b, scale); 
@@ -243,20 +262,15 @@ Create a container for RBM parameters (`h`, `W` & `b`).
 
 Parameters are arrays of type similar to `similarto`.
 """
-struct RBM{H,TW,Tb} <: SpinModel{H}
+struct RBM{H,TW,Tb,R<:Real} <: SpinModel{H}
     h::H               # h[i,μ]
     W::TW               # W[a,i,μ]
     b::Tb               # b[a]
     q::Int
     N::Int
     P::Int
-    function RBM(; N::T, P::T, q::T, similarto = Float32[]) where T<:Int
-        h = random_h!(similar(similarto, q,N), 0.01)
-        W = random_W!(similar(h, P,q,N), 0.1)
-        b = random_b!(similar(h, P), 0.01)
-        return new{typeof(h),typeof(W),typeof(b)}(h, W, b, q, N, P)
-    end
-    function RBM(h::AbstractMatrix{T}, W::AbstractArray{T,3}, b::AbstractVector{T}) where T
+    rbm_wt::R           # prefactor in front of the RBM term in energy func
+    function RBM(h::AbstractMatrix{T}, W::AbstractArray{T,3}, b::AbstractVector{T}; rbm_wt = 1) where T
         if !(size(h) == size(W)[2:3])
             return error("Incompatible arrays: size(h) = $(size(h)), size(W) = $(size(W))")
         end
@@ -264,17 +278,25 @@ struct RBM{H,TW,Tb} <: SpinModel{H}
             return error("Incompatible arrays: size(W) = $(size(W)), size(b) = $(size(b))")
         end
         P, q, N = size(W)
-        return new{typeof(h),typeof(W),typeof(b)}(h, W, b, q, N, P)
+        return new{typeof(h),typeof(W),typeof(b), eltype(h)}(
+            h, W, b, q, N, P, convert(eltype(h), rbm_wt)
+        )
     end
-    function RBM(a1::AbstractArray, a2::AbstractArray, a3::AbstractArray)
+    function RBM(; N::T, P::T, q::T, similarto = Float32[], rbm_wt = 1) where T<:Int
+        h = random_h!(similar(similarto, q,N), 0.01)
+        W = random_W!(similar(h, P,q,N), 0.1)
+        b = random_b!(similar(h, P), 0.01)
+        return RBM(h, W, b; rbm_wt = rbm_wt)
+    end
+    function RBM(a1::AbstractArray, a2::AbstractArray, a3::AbstractArray; rbm_wt = 1)
         params = (a1,a2,a3)
         h = params[findfirst(x -> ndims(x)==2, params)]
         W = params[findfirst(x -> ndims(x)==3, params)]
         b = params[findfirst(x -> ndims(x)==1, params)]
-        return RBM(h,W,b)
+        return RBM(h, W, b; rbm_wt = rbm_wt)
     end
 end
-Base.similar(θ::RBM) = RBM(P = θ.P, q = θ.q, N = θ.N, similarto = θ.W)
+Base.similar(θ::RBM) = RBM(P = θ.P, q = θ.q, N = θ.N, similarto = θ.W, rbm_wt = θ.rbm_wt)
 random!(θ::RBM, scale = 0.1) = (
     random_h!(θ.h, scale); random_W!(θ.W, scale); random_b!(θ.b, scale); θ
 )

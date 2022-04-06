@@ -76,8 +76,8 @@ function ratiomatch(z, θ::T, θ̄::T, buffer, gradient = true, energyscale = 1)
         sum!(B̃₂, B̃)                     # B̃₂[a,.,k,m] = ∑ᵨ W[a,ρ,k] * z[ρ,k,m]
         @. B̃ = W - B̃₂                   # B̃[a,σ,k,m] = W[a,σ,k] - ∑ᵨ W[a,ρ,k] * z[ρ,k,m]
         B̃.+= reshape(B, :,1,1,M)        # B̃[a,σ,k,m] = B[a,m] + W[a,σ,k] - ∑ᵨ W[a,ρ,k] * z[ρ,k,m]
-        ΔE.+= reshape(sum!(logcosh, B₁, B), 1,1,M)
-        ΔE.-= reshape(sum!(logcosh, B̃₁, B̃), q,N,M)
+        ΔE.+= θ.rbm_wt .* reshape(sum!(logcosh, B₁, B), 1,1,M)
+        ΔE.-= θ.rbm_wt .* reshape(sum!(logcosh, B̃₁, B̃), q,N,M)
     end
 
     isone(energyscale) || rmul!(ΔE, convert(eltype(ΔE), energyscale))
@@ -123,7 +123,7 @@ function ratiomatch(z, θ::T, θ̄::T, buffer, gradient = true, energyscale = 1)
         sum!(A₁₂, f)
         mul!(b̄, B, vec(A₁₂), -1, 0)
         mul!(b̄, reshape(B̃,:,q*N*M), vec(f), 1, 1)
-        b̄ .*= 4//(M * N * (q-1))
+        b̄ .*= 4//(M * N * (q-1)) .* θ.rbm_wt
         
         Bf̄ = B  # non-allocating alias
         Bf̄ .*= reshape(A₁₂, :,M)        # Bf̄[a,m] = B[a,m] * ∑ᵨₖ f[ρ,k,m]
@@ -139,7 +139,7 @@ function ratiomatch(z, θ::T, θ̄::T, buffer, gradient = true, energyscale = 1)
         B̃ .= .-sum!(B̃₂, B̃f) .* reshape(z,1,q,N,M)
 
         W̄ .+= sum!(B̃₄, B̃)
-        W̄ .*= 4//(M * N * (q-1))
+        W̄ .*= 4//(M * N * (q-1)) .* θ.rbm_wt
     end
 
     return L
