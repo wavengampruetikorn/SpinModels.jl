@@ -18,6 +18,7 @@ export MetropolisHastings, metropolishastings!
 export GibbsWithGradients, gibbswithgradients!
 export ZanellaMH, zanella_mh!
 export EnergyDescent, energydescent!
+include("samplers/SpinSamplers.jl")
 using .SpinSamplers
 
 
