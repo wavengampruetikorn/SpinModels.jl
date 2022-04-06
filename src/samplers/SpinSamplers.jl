@@ -17,5 +17,10 @@ include("metropolishastings.jl")
 export GibbsWithGradients, gibbswithgradients!
 include("gibbswithgradients.jl")
 
+export ZanellaMH, zanella_mh!
+include("zanella_mh.jl")
+
+export EnergyDescent, energydescent!
+include("energydescent.jl")
 
 end
