@@ -29,7 +29,7 @@ end
 
 (f::GibbsWithGradients)(X, energy) = gibbswithgradients!(X, energy, f)
 
-function gibbswithgradients!(X::AbstractArray{T,3}, energy, buffer = MetropolisHastings(X)) where T
+function gibbswithgradients!(X::AbstractArray{T,3}, energy, buffer = GibbsWithGradients(X)) where T
     (; A, A₁, α, I, batchshift, 𝕡, 𝕀, q, N, M, catsampler) = buffer
     _onehalf = convert(T, 1//2)
     E, ∇E = energy(X)
