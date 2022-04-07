@@ -32,7 +32,7 @@ function energydescent!(X::AbstractArray{T,3}, Δenergy, buffer = EnergyDescent(
     @. A = X + (A - A₁ * X)         # proposed state
     @. A = A > _onehalf             # ensure the entries are in (0,1)
 
-    @. α = δE < 0                   # flip to new state only if energy decreases
+    @. α = (δE < 0) & (δE ≉ 0)      # flip to new state only if energy decreases
 
     @. X = (1-α) * X + α * A        # update X
     @. X = X > _onehalf             # ensure the entries are in (0,1)
